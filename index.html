@@ -25,9 +25,6 @@ body{font-family:'Cormorant Garamond',Georgia,serif;color:var(--cream);
  filter:drop-shadow(0 0 18px rgba(243,169,187,.9)) drop-shadow(0 0 40px rgba(233,201,138,.5))}
 @keyframes beat{0%,100%{transform:scale(1)}50%{transform:scale(1.14)}}
 
-#muteBtn{position:fixed;top:calc(env(safe-area-inset-top) + 12px);right:14px;z-index:100;width:42px;height:42px;border-radius:50%;
- border:1px solid rgba(233,201,138,.6);background:rgba(20,7,13,.55);color:var(--gold);font-size:20px;line-height:1;cursor:pointer;
- backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
 #s1.magic p{opacity:0;transition:opacity 1s}
 #s1.magic .heart{animation:magic 1.5s ease-in forwards}
 @keyframes magic{0%{transform:scale(1)}100%{transform:scale(2.4);filter:drop-shadow(0 0 40px #fff) drop-shadow(0 0 90px rgba(233,201,138,.9));opacity:.15}}
@@ -101,8 +98,6 @@ body{font-family:'Cormorant Garamond',Georgia,serif;color:var(--cream);
 <audio id="hoihop" src="hoihop.mp3" preload="auto"></audio>
 <audio id="sinhnhat" src="sinhnhat.mp3" loop preload="auto"></audio>
 
-<!-- Nút bật/tắt âm thanh (luôn hiển thị ở góc trên bên phải) -->
-<button id="muteBtn" aria-label="Bật/tắt âm thanh">🔊</button>
 
 <!-- MÀN 1 -->
 <section class="screen active" id="s1">
@@ -182,12 +177,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 /* Mở khóa thẻ <audio> trên di động: phát (tắt tiếng) rồi dừng ngay, thực hiện trong cú chạm đầu tiên */
 function unlock(a){ a.muted = true; a.play().then(() => { a.pause(); a.currentTime = 0; a.muted = userMuted; }).catch(() => { a.muted = userMuted; }); }
 
-/* Nút loa: tắt/bật toàn bộ âm thanh */
-$('muteBtn').addEventListener('click', () => {
-  userMuted = !userMuted;
-  [dieuky, hoihop, sinhnhat].forEach(a => a.muted = userMuted);
-  $('muteBtn').textContent = userMuted ? '🔇' : '🔊';
-});
 /* Nếu trình duyệt tự tạm dừng nhạc sinh nhật (vd. khi iOS bật micro) thì phát lại để nhạc không bị ngắt */
 sinhnhat.addEventListener('pause', () => { if(music3On && !document.hidden) setTimeout(() => sinhnhat.play().catch(() => {}), 150); });
 
@@ -316,29 +305,42 @@ function enterCake(){
 }
 $('flameBox').addEventListener('click', blowOut); /* dự phòng: chạm vào ngọn nến */
 
+/* ---- Cấu hình nhận diện tiếng thổi (chỉnh tại đây) ---- */
+const MIC_BO_QUA_MS  = 1500; /* bỏ qua 1.5 giây đầu sau khi người dùng bấm "Cho phép" */
+const MIC_NGUONG_RMS = 0.22; /* ngưỡng âm lượng (đã nâng cao). Nâng lên nếu vẫn tắt nhầm, hạ xuống nếu khó tắt */
+const MIC_NGUONG_LOW = 100;  /* ngưỡng năng lượng tần số thấp (đặc trưng của luồng hơi thổi) */
+const MIC_GIU_MS     = 500;  /* âm thanh phải duy trì liên tục ít nhất 0.5 giây */
+const MIC_DUNG_NGAT  = 120;  /* cho phép đứt quãng tối đa 0.12 giây (nhiễu từng khung hình) */
+
 async function initMic(){
   try{
-    micStream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+    /* Bật lọc tiếng vọng + khử ồn để micro tự loại bỏ nhạc nền phát từ loa */
+    micStream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:false}});
+    const tCho = performance.now(); /* mốc thời gian: ngay sau khi người dùng bấm "Cho phép" */
     if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     await audioCtx.resume();
     if(sinhnhat.paused) sinhnhat.play().catch(() => {}); /* iOS đôi khi dừng nhạc khi bật mic */
     const an = audioCtx.createAnalyser(); an.fftSize = 1024; an.smoothingTimeConstant = .3;
     audioCtx.createMediaStreamSource(micStream).connect(an);
     const buf = new Uint8Array(an.fftSize), freq = new Uint8Array(an.frequencyBinCount);
-    let strong = 0;
+    let batDau = 0, lanCuoi = 0; /* thời điểm bắt đầu thổi liên tục / lần cuối còn vượt ngưỡng */
+    const fb = $('flameBox');
     const listen = () => {
       if(candleOut) return;
+      const now = performance.now();
+      /* 1.5 giây đầu: chỉ lắng nghe, bỏ qua hoàn toàn */
+      if(now - tCho < MIC_BO_QUA_MS){ requestAnimationFrame(listen); return; }
       an.getByteTimeDomainData(buf); an.getByteFrequencyData(freq);
       let sum = 0; for(let i=0;i<buf.length;i++){ const v = (buf[i]-128)/128; sum += v*v; }
       const rms = Math.sqrt(sum/buf.length);
       /* tiếng thổi = ồn rộng, nhiều năng lượng ở tần số thấp (< ~1.5kHz) */
       let low = 0; for(let i=2;i<40;i++) low += freq[i]; low /= 38;
-      const NGUONG = 0.12; /* ← chỉnh độ nhạy: nhỏ hơn = nhạy hơn */
-      if(rms > NGUONG*.5 || low > 90){
-        strong++;
-        $('flameBox').style.transform = `skewX(${Math.min(strong*4,38)}deg) scaleY(${Math.max(1-strong*.03,.7)})`;
-      } else { strong = Math.max(strong-1,0); $('flameBox').style.transform = `skewX(${strong*4}deg)`; }
-      if((rms > NGUONG && low > 60) && strong > 6){ blowOut(); return; }
+      const dangThoi = rms > MIC_NGUONG_RMS && low > MIC_NGUONG_LOW;
+      if(dangThoi){ if(!batDau) batDau = now; lanCuoi = now; }
+      else if(batDau && now - lanCuoi > MIC_DUNG_NGAT){ batDau = 0; } /* đứt quãng quá lâu → tính lại từ đầu */
+      const tienDo = batDau ? Math.min((now - batDau) / MIC_GIU_MS, 1) : 0;
+      fb.style.transform = tienDo ? `skewX(${tienDo*38}deg) scaleY(${1 - tienDo*.3})` : '';
+      if(tienDo >= 1){ blowOut(); return; }
       requestAnimationFrame(listen);
     };
     listen();
